@@ -7,7 +7,7 @@ centers. Pins are stored grouped by net, so per-net reductions are segment
 reductions.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
 import torch
@@ -64,9 +64,6 @@ class Design:
     def pin_pos(self, pos: torch.Tensor) -> torch.Tensor:
         """(p, 2) absolute pin positions for object centers `pos`."""
         return pos[self.pin_obj] + self.pin_offset
-
-    def with_pos(self, pos: torch.Tensor) -> "Design":
-        return replace(self, pos=pos)
 
     def summary(self) -> str:
         mov, mac = self.movable, self.macro

@@ -25,17 +25,17 @@ def macros_for(num_cells: int) -> int:
     return max(0, round(4 * math.log2(num_cells / 1000)))
 
 
-def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=("default", "ds", "ld", "ldds"), movable_macros=True, seed=0, cfg=PlacerConfig(), plots=True) -> list[dict]:
+def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=tuple(MODES), movable_macros=True, seed=0, cfg=PlacerConfig(), plots=True) -> list[dict]:
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     for n in sizes:
         design = generate(n, macros_for(n), movable_macros=movable_macros, seed=seed)
         print(design.summary(), flush=True)
         ref = hpwl(design, design.pos)
-        default_hpwl = None
+        first_hpwl = None
         for mode in modes:
             res = global_place(design, replace(cfg, **MODES[mode]))
-            default_hpwl = default_hpwl or res.hpwl
+            first_hpwl = first_hpwl or res.hpwl
             row = dict(
                 design=design.name,
                 mode=mode,
@@ -49,7 +49,7 @@ def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=("default", "ds
                 initial_hpwl=res.initial_hpwl,
                 hpwl=res.hpwl,
                 hpwl_vs_ref=res.hpwl / ref,
-                hpwl_vs_first_mode=res.hpwl / default_hpwl,
+                hpwl_vs_first_mode=res.hpwl / first_hpwl,
                 overflow=res.overflow,
                 iterations=res.iterations,
                 trial_iterations=res.trial_iterations,

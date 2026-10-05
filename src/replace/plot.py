@@ -1,16 +1,13 @@
 """Placement result figure: placement before and after global placement, with
 the HPWL and overflow curves underneath."""
 
-import matplotlib
+import torch
+from matplotlib.collections import PolyCollection
+from matplotlib.figure import Figure
+from matplotlib.patches import Patch, Rectangle
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import torch  # noqa: E402
-from matplotlib.collections import PolyCollection  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
-
-from .design import Design  # noqa: E402
-from .placer import PlaceResult  # noqa: E402
+from .design import Design
+from .placer import PlaceResult
 
 DPI = 200
 
@@ -24,7 +21,7 @@ def _rects(pos: torch.Tensor, size: torch.Tensor):
 def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tensor, filler_size: torch.Tensor, title: str):
     """Die outline, fillers (green), cells (red), movable macros (blue), fixed macros (gray)."""
     xl, yl, xh, yh = design.die
-    ax.add_patch(plt.Rectangle((xl, yl), xh - xl, yh - yl, fill=False, lw=0.8))
+    ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False, lw=0.8))
     pos, size = pos.detach().float(), design.size.float()
     # Collections skip autolim (slow for many polygons): the limits are the die.
     if len(filler_pos):
@@ -49,7 +46,7 @@ def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tens
 
 
 def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
-    fig = plt.figure(figsize=(14, 13), layout="constrained")
+    fig = Figure(figsize=(14, 13), layout="constrained")
     grid = fig.add_gridspec(3, 2, height_ratios=[3, 1, 1])
     draw_placement(fig.add_subplot(grid[0, 0]), design, res.initial_pos, res.initial_filler_pos, res.filler_size,
                    f"before: initial placement, HPWL {res.history[0]['hpwl']:.4g}, overflow {res.history[0]['overflow']:.3f}")
@@ -79,4 +76,3 @@ def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
         ax.grid(alpha=0.3)
     fig.suptitle(title or design.summary())
     fig.savefig(path, dpi=DPI)
-    plt.close(fig)

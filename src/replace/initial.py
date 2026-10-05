@@ -21,7 +21,7 @@ def _b2b_system(design: Design, pos: torch.Tensor, axis: int, var: torch.Tensor,
     x = pos[design.pin_obj, axis] + design.pin_offset[:, axis]
     net, n_nets = design.pin_net, design.num_nets
     pin = torch.arange(design.num_pins)
-    degree = torch.bincount(net, minlength=n_nets)
+    degree = design.net_degree
 
     # The bound pins of each net. Ties pick the lowest index for min and the
     # highest for max, so the two bounds differ whenever a net has >= 2 pins.

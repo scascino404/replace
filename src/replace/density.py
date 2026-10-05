@@ -118,7 +118,7 @@ class Density:
         stretched = torch.maximum(sizes, math.sqrt(2) * self.bin_size)
         self.half = stretched / 2
         # Each object's per-unit-area weight, so the map is in units of density.
-        self.weight = sizes.prod(1) / stretched.prod(1) / self.bin_area
+        weight = sizes.prod(1) / stretched.prod(1) / self.bin_area
         self.movable_area = sizes[:num_cells].prod(1).sum().item()
         span = (stretched / self.bin_size).amax(1)
         windows = torch.full((len(sizes),), -1)  # -1: dense
@@ -127,7 +127,7 @@ class Density:
         self.groups = []
         for w in windows.unique().tolist():
             idx = (windows == w).nonzero().squeeze(1)
-            self.groups.append(_Group(idx, w if w > 0 else None, self.half[idx], self.weight[idx], idx >= num_cells))
+            self.groups.append(_Group(idx, w if w > 0 else None, self.half[idx], weight[idx], idx >= num_cells))
 
         # Fixed objects: exact overlap area, constant over the whole placement.
         f = design.fixed

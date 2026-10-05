@@ -137,19 +137,17 @@ class _Problem:
         self.area = sizes.prod(1)
 
         self.delta_hpwl_ref = cfg.delta_hpwl_ref or 0.075 * design.num_nets * self.bin_size
-        self.init_density_penalty = cfg.init_density_penalty
         self.cfg = cfg
-        self.reset()
 
     def reset(self) -> None:
-        """Initial gamma from the overflow, initial lambda balancing the
-        wirelength and density gradients."""
+        """Start a run: initial gamma from the overflow, initial lambda
+        balancing the wirelength and density gradients."""
         x = self.x0.clone().requires_grad_()
         energy, overflow = self.density(x)
         self.gamma = wa_gamma(overflow, self.bin_size)
         (g_wl,) = torch.autograd.grad(wa_wirelength(self.design, self.full_pos(x), self.gamma), x)
         (g_d,) = torch.autograd.grad(energy, x)
-        self.lam = self.init_density_penalty * g_wl.abs().sum().item() / g_d.abs().sum().clamp(min=1e-30).item()
+        self.lam = self.cfg.init_density_penalty * g_wl.abs().sum().item() / g_d.abs().sum().clamp(min=1e-30).item()
         # Local density state (-ld): Delta_i starts at 0 (Eq. 3).
         self.alpha = self.cfg.ld_alpha
         self.beta = self.cfg.ld_beta * self.lam
@@ -173,10 +171,9 @@ class _Problem:
     def evaluate(self, x: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """Preconditioned gradient of f at x plus HPWL/overflow/potential statistics."""
         x = x.detach().requires_grad_()
-        pos = self.full_pos(x)
         ld = self.cfg.local_density
         energy, overflow, *local = self.density(x, self.alpha if ld else None)
-        wl, exact_hpwl = wirelength(self.design, pos, self.gamma)
+        wl, exact_hpwl = wirelength(self.design, self.full_pos(x), self.gamma)
         (grad,) = torch.autograd.grad(wl + self.lam * energy, x)
         stats = {"hpwl": exact_hpwl, "overflow": overflow, "energy": energy.item()}
         if ld:
@@ -187,19 +184,25 @@ class _Problem:
         return grad / precond[:, None], stats
 
 
-def _nesterov_run(prob: _Problem, cfg: PlacerConfig, stop_overflow: float, schedule: DynamicStepSize | None, tag: str):
+def _nesterov_run(prob: _Problem, stop_overflow: float, schedule: DynamicStepSize | None, tag: str):
     """One Nesterov placement from the initial placement until the overflow
     reaches stop_overflow. Returns the optimizer and the per-iteration history."""
+    cfg = prob.cfg
     prob.reset()
     opt = Nesterov(prob.x0, prob.evaluate, prob.project, initial_move=0.1 * prob.bin_size)
     prev_hpwl = opt.stats["hpwl"]
-    scalars = lambda stats: {k: v for k, v in stats.items() if isinstance(v, float)}  # noqa: E731
-    history = [dict(iter=0, **scalars(opt.stats), lam=prob.lam, gamma=prob.gamma, cof_max=cfg.cof_max)]
+    history = []
+
+    def record(it: int, cof_max: float) -> None:
+        scalars = {k: v for k, v in opt.stats.items() if isinstance(v, float)}
+        history.append(dict(iter=it, **scalars, lam=prob.lam, gamma=prob.gamma, cof_max=cof_max))
+
+    record(0, cfg.cof_max)
     for it in range(1, cfg.max_iters + 1):
         opt.step()
         cur_hpwl, overflow = opt.stats["hpwl"], opt.stats["overflow"]
         cof_max = schedule.cof_max(cur_hpwl, opt.stats["energy"]) if schedule else cfg.cof_max
-        history.append(dict(iter=it, **scalars(opt.stats), lam=prob.lam, gamma=prob.gamma, cof_max=cof_max))
+        record(it, cof_max)
         if cfg.log_every and it % cfg.log_every == 0:
             print(f"  {tag} iter {it:5d}  hpwl {cur_hpwl:.4e}  overflow {overflow:.3f}  lambda {prob.lam:.3e}  cof_max {cof_max:.4f}")
         if overflow <= stop_overflow:
@@ -224,11 +227,11 @@ def global_place(design: Design, cfg: PlacerConfig = PlacerConfig()) -> PlaceRes
         # Trial placement (tGP) with the default lambda schedule, stopped once
         # the overflow is well below its initial value (Section IV-B).
         stop = prob.initial_overflow / cfg.trial_overflow_divisor
-        _, trial = _nesterov_run(prob, cfg, max(stop, cfg.target_overflow), None, "trial")
+        _, trial = _nesterov_run(prob, max(stop, cfg.target_overflow), None, "trial")
         tps = find_transition_points([h["hpwl"] for h in trial])
         schedule = DynamicStepSize(tps, [h["hpwl"] for h in trial], [h["energy"] for h in trial])
 
-    opt, history = _nesterov_run(prob, cfg, cfg.target_overflow, schedule, "place")
+    opt, history = _nesterov_run(prob, cfg.target_overflow, schedule, "place")
     return PlaceResult(
         pos=prob.full_pos(opt.v),
         filler_pos=opt.v[prob.num_movable :],

@@ -37,7 +37,6 @@ class Nesterov:
         probe = project(self.v - initial_move / self.g.abs().max().clamp(min=1e-30) * self.g)
         g_probe, _ = grad_fn(probe)
         self.step_length = _lipschitz_step(self.v, self.g, probe, g_probe)
-        self.backtracks = 0
 
     def step(self) -> None:
         a_next = (1.0 + math.sqrt(4.0 * self.a**2 + 1.0)) / 2.0
@@ -50,5 +49,4 @@ class Nesterov:
             self.step_length = new_step
             if accept:
                 break
-            self.backtracks += 1
         self.u, self.v, self.g, self.a, self.stats = u_next, v_next, g_next, a_next, stats

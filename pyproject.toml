@@ -1,7 +1,7 @@
 [project]
 name = "replace"
 version = "0.1.0"
-description = "Add your description here"
+description = "RePlAce global placement in PyTorch"
 readme = "README.md"
 authors = [
     { name = "scascino404", email = "scascino4@proton.me" }

@@ -32,7 +32,7 @@ def main() -> None:
     b = sub.add_parser("bench", help="benchmark on random designs of increasing size")
     b.add_argument("--sizes", type=lambda s: [int(x) for x in s.split(",")], help="comma-separated cell counts")
     b.add_argument("--out", default="benchmarks/results")
-    b.add_argument("--modes", default="default,ds,ld,ldds", help="comma-separated placer variants: default, ds, ld, ldds")
+    b.add_argument("--modes", type=lambda s: s.split(","), help="comma-separated placer variants: default, ds, ld, ldds")
     b.add_argument("--no-plots", action="store_true")
     placer_args(b)
 
@@ -62,7 +62,7 @@ def main() -> None:
         bench.run(
             args.sizes or bench.DEFAULT_SIZES,
             args.out,
-            modes=args.modes.split(","),
+            modes=args.modes or tuple(bench.MODES),
             movable_macros=not args.fixed_macros,
             seed=args.seed,
             cfg=cfg,
