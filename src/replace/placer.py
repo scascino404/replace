@@ -25,7 +25,7 @@ from .design import Design
 from .dynamic_step import DynamicStepSize, TransitionPoints, find_transition_points
 from .initial import initial_place
 from .nesterov import Nesterov
-from .wirelength import hpwl, wa_wirelength
+from .wirelength import hpwl, wa_wirelength, wirelength
 
 
 @dataclass
@@ -176,9 +176,9 @@ class _Problem:
         pos = self.full_pos(x)
         ld = self.cfg.local_density
         energy, overflow, *local = self.density(x, self.alpha if ld else None)
-        f = wa_wirelength(self.design, pos, self.gamma) + self.lam * energy
-        (grad,) = torch.autograd.grad(f, x)
-        stats = {"hpwl": hpwl(self.design, pos), "overflow": overflow, "energy": energy.item()}
+        wl, exact_hpwl = wirelength(self.design, pos, self.gamma)
+        (grad,) = torch.autograd.grad(wl + self.lam * energy, x)
+        stats = {"hpwl": exact_hpwl, "overflow": overflow, "energy": energy.item()}
         if ld:
             # Eq. 9: each object's local density gradient scaled by its Delta_i.
             local_grad, stats["bin_overflow"] = local[0]

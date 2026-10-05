@@ -16,8 +16,9 @@ DPI = 200
 
 
 def _rects(pos: torch.Tensor, size: torch.Tensor):
-    lo, hi = (pos - size / 2).numpy(), (pos + size / 2).numpy()
-    return [[(a[0], a[1]), (b[0], a[1]), (b[0], b[1]), (a[0], b[1])] for a, b in zip(lo, hi)]
+    """(k, 4, 2) rectangle corners (an array builds a PolyCollection much faster than lists)."""
+    lo, hi = pos - size / 2, pos + size / 2
+    return torch.stack([lo, torch.stack([hi[:, 0], lo[:, 1]], 1), hi, torch.stack([lo[:, 0], hi[:, 1]], 1)], 1).numpy()
 
 
 def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tensor, filler_size: torch.Tensor, title: str):
@@ -25,8 +26,9 @@ def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tens
     xl, yl, xh, yh = design.die
     ax.add_patch(plt.Rectangle((xl, yl), xh - xl, yh - yl, fill=False, lw=0.8))
     pos, size = pos.detach().float(), design.size.float()
+    # Collections skip autolim (slow for many polygons): the limits are the die.
     if len(filler_pos):
-        ax.add_collection(PolyCollection(_rects(filler_pos.detach().float(), filler_size.float()), facecolor="tab:green", edgecolor="none", alpha=0.25))
+        ax.add_collection(PolyCollection(_rects(filler_pos.detach().float(), filler_size.float()), facecolor="tab:green", edgecolor="none", alpha=0.25), autolim=False)
     groups = [
         ("cells", design.movable & ~design.macro, dict(facecolor="tab:red", edgecolor="none", alpha=0.6)),
         ("movable macros", design.movable & design.macro, dict(facecolor="tab:blue", edgecolor="navy", lw=0.5, alpha=0.4)),
@@ -37,7 +39,7 @@ def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tens
         legend.append(Patch(facecolor="tab:green", alpha=0.4, label="fillers"))
     for label, mask, style in groups:
         if mask.any():
-            ax.add_collection(PolyCollection(_rects(pos[mask], size[mask]), **style))
+            ax.add_collection(PolyCollection(_rects(pos[mask], size[mask]), **style), autolim=False)
             legend.append(Patch(**style, label=label))
     ax.legend(handles=legend, loc="upper right", fontsize=8, framealpha=0.9)
     ax.set_xlim(xl, xh)

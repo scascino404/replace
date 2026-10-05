@@ -62,30 +62,38 @@ def _b2b_system(design: Design, pos: torch.Tensor, axis: int, var: torch.Tensor,
     rhs += eps * pos[var >= 0, axis]
     idx = torch.arange(num_vars)
     rows, cols, vals = torch.cat(rows + [idx]), torch.cat(cols + [idx]), torch.cat(vals + [diag])
-    a_mat = torch.sparse_coo_tensor(torch.stack([rows, cols]), vals, (num_vars, num_vars), check_invariants=False)
+    # CSR: entries sorted by (row, col), duplicates summed. Built directly, as
+    # COO coalesce() is several times slower. int32 indices spare the matrix-vector
+    # product an index conversion on every call.
+    key, order = (rows * num_vars + cols).sort(stable=True)
+    key, entry = key.unique_consecutive(return_inverse=True)
+    vals = vals.new_zeros(len(key)).index_add_(0, entry, vals[order])
+    crow = torch.cat([key.new_zeros(1), torch.bincount(key // num_vars, minlength=num_vars).cumsum(0)])
     with warnings.catch_warnings():  # CSR is "beta" in PyTorch, but ~100x faster than COO here
         warnings.simplefilter("ignore")
-        a_mat = a_mat.coalesce().to_sparse_csr()
+        a_mat = torch.sparse_csr_tensor(crow.int(), (key % num_vars).int(), vals, (num_vars, num_vars))
     return a_mat, rhs, diag
 
 
 def _pcg(a: torch.Tensor, b: torch.Tensor, diag: torch.Tensor, x: torch.Tensor, iters: int, tol: float) -> torch.Tensor:
-    """Jacobi-preconditioned conjugate gradient for symmetric positive definite A."""
+    """Jacobi-preconditioned conjugate gradient for symmetric positive definite A.
+    In-place updates and Python-float scalars keep the per-iteration op count low."""
+    x = x.clone()
     r = b - a @ x
     z = r / diag
     p = z.clone()
-    rz = r @ z
-    b_norm = b.norm().clamp(min=1e-30)
+    rz = r.dot(z).item()
+    stop = (tol * max(b.norm().item(), 1e-30)) ** 2  # on |r|^2
     for _ in range(iters):
         ap = a @ p
-        alpha = rz / (p @ ap)
-        x = x + alpha * p
-        r = r - alpha * ap
-        if r.norm() < tol * b_norm:
+        alpha = rz / p.dot(ap).item()
+        x.add_(p, alpha=alpha)
+        r.sub_(ap, alpha=alpha)
+        if r.dot(r).item() < stop:
             break
-        z = r / diag
-        rz_new = r @ z
-        p = z + (rz_new / rz) * p
+        torch.div(r, diag, out=z)
+        rz_new = r.dot(z).item()
+        p.mul_(rz_new / rz).add_(z)
         rz = rz_new
     return x
 

@@ -41,7 +41,7 @@ def test_density_map_conserves_charge():
     energy, grad, overflow = dens.evaluate(centers)
     assert torch.isfinite(grad).all() and energy > 0 and 0 <= overflow <= 1
     # Charge of small (windowed) and large (dense) objects is fully accounted for.
-    rho = dens._map(dens._footprints(centers), torch.ones_like(dens.small, dtype=torch.bool), torch.ones_like(dens.large, dtype=torch.bool))
+    rho = dens._map(dens._footprints(centers))
     assert math.isclose(rho.sum().item() * dens.bin_area, sizes.prod(1).sum().item(), rel_tol=1e-4)
 
 

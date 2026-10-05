@@ -3,10 +3,12 @@
 A design is a set of rectangular *objects* (standard cells, macros, IO pads)
 connected by *nets*. Every net is a set of *pins*; every pin sits on one object
 at a fixed offset from the object's center. Positions always refer to object
-centers.
+centers. Pins are stored grouped by net, so per-net reductions are segment
+reductions.
 """
 
 from dataclasses import dataclass, replace
+from functools import cached_property
 
 import torch
 
@@ -23,6 +25,16 @@ class Design:
     pin_net: torch.Tensor  # (p,) net of each pin
     pin_offset: torch.Tensor  # (p, 2) pin location relative to its object's center
     num_nets: int
+
+    def __post_init__(self):
+        if (self.pin_net.diff() < 0).any():
+            order = self.pin_net.argsort(stable=True)
+            self.pin_obj, self.pin_net, self.pin_offset = self.pin_obj[order], self.pin_net[order], self.pin_offset[order]
+
+    @cached_property
+    def net_degree(self) -> torch.Tensor:
+        """(num_nets,) pins per net."""
+        return torch.bincount(self.pin_net, minlength=self.num_nets)
 
     @property
     def num_objects(self) -> int:

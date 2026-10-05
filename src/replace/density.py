@@ -11,16 +11,28 @@ equilibrium state is a uniform density at the target value.
 """
 
 import math
+from typing import NamedTuple
 
 import torch
 
 from .design import Design
 
-# Objects spanning at most this many bins per axis (standard cells, fillers)
-# touch a window of WINDOW consecutive bins; their overlaps are computed only
-# there. Larger objects (macros) use dense overlaps with every bin.
-SMALL_SPAN = 4
-WINDOW = SMALL_SPAN + 1
+# Objects spanning at most `span` bins per axis touch a window of span + 1
+# consecutive bins; their overlaps are computed only there. Nearly all standard
+# cells and fillers span <= 2 bins (3 x 3 windows), a few up to 4 (5 x 5).
+# Larger objects (macros) use dense overlaps with every bin.
+WINDOW_SPANS = (2, 4)
+
+
+class _Group(NamedTuple):
+    """Objects sharing one footprint layout: windowed (window = bins per
+    axis) or dense (window None)."""
+
+    idx: torch.Tensor  # (k,) object indices
+    window: int | None
+    half: torch.Tensor  # (k, 2) stretched half sizes
+    weight: torch.Tensor  # (k,) per-unit-area weight
+    filler: torch.Tensor  # (k,) True for fillers
 
 
 def bin_count(design: Design, target_density: float) -> int:
@@ -71,11 +83,11 @@ def overlap(center: torch.Tensor, half: torch.Tensor, lo: torch.Tensor, hi: torc
     return (torch.minimum(center[:, None] + half[:, None], hi) - torch.maximum(center[:, None] - half[:, None], lo)).clamp(min=0)
 
 
-def overlap_slope(center: torch.Tensor, half: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
-    """Derivative of `overlap` w.r.t. the center: +1 where only the interval's
-    right end lies inside the bin, -1 where only its left end does."""
+def overlap_slope(center: torch.Tensor, half: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor, ov: torch.Tensor) -> torch.Tensor:
+    """Derivative of `overlap` (given as `ov`) w.r.t. the center: +1 where only
+    the interval's right end lies inside the bin, -1 where only its left end does."""
     c, h = center[:, None], half[:, None]
-    inside = overlap(center, half, lo, hi) > 0
+    inside = ov > 0
     return ((c + h < hi).to(c.dtype) - (c - h > lo).to(c.dtype)) * inside
 
 
@@ -108,8 +120,14 @@ class Density:
         # Each object's per-unit-area weight, so the map is in units of density.
         self.weight = sizes.prod(1) / stretched.prod(1) / self.bin_area
         self.movable_area = sizes[:num_cells].prod(1).sum().item()
-        small = (stretched <= SMALL_SPAN * self.bin_size).all(1)
-        self.small, self.large = small.nonzero().squeeze(1), (~small).nonzero().squeeze(1)
+        span = (stretched / self.bin_size).amax(1)
+        windows = torch.full((len(sizes),), -1)  # -1: dense
+        for s in reversed(WINDOW_SPANS):
+            windows[span <= s] = s + 1
+        self.groups = []
+        for w in windows.unique().tolist():
+            idx = (windows == w).nonzero().squeeze(1)
+            self.groups.append(_Group(idx, w if w > 0 else None, self.half[idx], self.weight[idx], idx >= num_cells))
 
         # Fixed objects: exact overlap area, constant over the whole placement.
         f = design.fixed
@@ -137,64 +155,78 @@ class Density:
         self.wu_w2 = (w_u[:, None] * inv).to(sizes.dtype)
         self.wv_w2 = (w_v[None, :] * inv).to(sizes.dtype)
 
-    def _window(self, center: torch.Tensor, half: torch.Tensor, axis: int):
-        """Bin indices, lower bin edges (both (k, WINDOW)) of the WINDOW bins
-        starting at each small object's first bin along one axis."""
+    def _window(self, center: torch.Tensor, half: torch.Tensor, axis: int, window: int):
+        """Bin indices, lower bin edges (both (k, window)) of the `window` bins
+        starting at each object's first bin along one axis."""
         size = self.bin_size[axis]
         first = ((center - half - self.origin[axis]) / size).floor().long().clamp(0, self.bins - 1)
-        idx = first[:, None] + torch.arange(WINDOW)
+        idx = first[:, None] + torch.arange(window)
         # Bins past the die edge get zero overlap; clamp their index to stay valid.
         return idx.clamp(max=self.bins - 1), self.origin[axis] + idx * size
 
-    def _footprints(self, centers: torch.Tensor, slopes: bool = False) -> dict:
-        """Per-axis overlaps of every object with the bins: small objects over
-        their WINDOW bins ("sx", "sy", flattened 2-D bin indices "flat"), large
-        ones over all bins ("lx", "ly"). Rectangle/bin overlap area factorizes
-        into x-overlap * y-overlap; x-overlaps include the object's weight.
-        With slopes, also the derivatives of the x/y-overlaps w.r.t. the center."""
-        s, big, m = self.small, self.large, self.bins
-        fp = {}
-        for axis, name in ((0, "x"), (1, "y")):
-            c, h = centers[s, axis], self.half[s, axis]
-            idx, lo = self._window(c, h, axis)
-            hi = lo + self.bin_size[axis]
-            fp["s" + name], fp["s_idx" + name] = overlap(c, h, lo, hi), idx
-            cb, hb = centers[big, axis], self.half[big, axis]
-            fp["l" + name] = overlap(cb, hb, self.lo[axis], self.hi[axis])
-            if slopes:
-                fp["sd" + name] = overlap_slope(c, h, lo, hi)
-                fp["ld" + name] = overlap_slope(cb, hb, self.lo[axis], self.hi[axis])
-        fp["flat"] = fp.pop("s_idxx")[:, :, None] * m + fp.pop("s_idxy")[:, None, :]
-        return fp
+    def _footprints(self, centers: torch.Tensor, slopes: bool = False) -> list[dict]:
+        """Per group (see `groups`), per-axis overlaps of its objects with the
+        bins ("x", "y"): windowed groups over their window bins, with flattened
+        2-D bin indices "flat", dense ones over all bins. Rectangle/bin overlap
+        area factorizes into x-overlap * y-overlap. With slopes, also the
+        derivatives of the x/y-overlaps w.r.t. the center ("dx", "dy")."""
+        fps = []
+        for g in self.groups:
+            c = centers[g.idx]
+            fp, bins = {}, []
+            for axis, name in ((0, "x"), (1, "y")):
+                if g.window:
+                    idx, lo = self._window(c[:, axis], g.half[:, axis], axis, g.window)
+                    hi = lo + self.bin_size[axis]
+                    bins.append(idx)
+                else:
+                    lo, hi = self.lo[axis], self.hi[axis]
+                fp[name] = overlap(c[:, axis], g.half[:, axis], lo, hi)
+                if slopes:
+                    fp["d" + name] = overlap_slope(c[:, axis], g.half[:, axis], lo, hi, fp[name])
+            if g.window:
+                fp["flat"] = bins[0][:, :, None] * self.bins + bins[1][:, None, :]
+            fps.append(fp)
+        return fps
 
-    def _gather(self, fp: dict, field: torch.Tensor, x: str = "x", y: str = "y", weighted: bool = True) -> torch.Tensor:
-        """(k,) per object: sum over bins of weight * x-part * y-part * field,
-        where the parts are the overlaps (or slopes, x="dx"...) in `fp`."""
-        s, big = self.small, self.large
-        out = field.new_empty(len(self.half))
-        sx, lx = fp["s" + x], fp["l" + x]
-        if weighted:
-            sx, lx = sx * self.weight[s, None], lx * self.weight[big, None]
-        out[s] = ((sx[:, :, None] * fp["s" + y][:, None, :]) * field.flatten()[fp["flat"]]).sum((1, 2))
-        out[big] = ((lx @ field) * fp["l" + y]).sum(1)
+    def _gather(self, fps: list[dict], *fields: torch.Tensor, x: str = "x", y: str = "y", weighted: bool = True) -> torch.Tensor:
+        """(n, C) for C (M, M) fields: per object and field, the sum over bins
+        of weight * x-part * y-part * field, where the parts are the overlaps
+        (or slopes, x="dx"...) in `fps`."""
+        f = torch.stack(fields)  # (C, M, M)
+        per_bin = f.flatten(1).T.contiguous()  # (M * M, C): one gather for all fields
+        out = f.new_empty(len(self.half), len(fields))
+        for g, fp in zip(self.groups, fps):
+            px = fp[x] * g.weight[:, None] if weighted else fp[x]
+            if g.window:
+                part = (px[:, :, None] * fp[y][:, None, :])[..., None] * per_bin[fp["flat"]]
+                out[g.idx] = part.sum((1, 2))
+            else:
+                out[g.idx] = ((px @ f) * fp[y]).sum(2).T
         return out
 
-    def _map(self, fp: dict, small_mask: torch.Tensor, big_mask: torch.Tensor) -> torch.Tensor:
-        """(M, M) density map of the selected objects."""
+    def _map(self, fps: list[dict]) -> torch.Tensor:
+        """(2, M, M) density maps of the cells and of the fillers."""
         m = self.bins
-        s, big = self.small, self.large
-        area = (fp["sx"] * self.weight[s, None])[small_mask][:, :, None] * fp["sy"][small_mask][:, None, :]
-        rho = area.new_zeros(m * m).index_add_(0, fp["flat"][small_mask].flatten(), area.flatten())
-        return rho.view(m, m) + (fp["lx"] * self.weight[big, None])[big_mask].T @ fp["ly"][big_mask]
+        rho = self.half.new_zeros(2, m, m)
+        for g, fp in zip(self.groups, fps):
+            px = fp["x"] * g.weight[:, None]
+            if g.window:
+                area = px[:, :, None] * fp["y"][:, None, :]
+                flat = fp["flat"] + (g.filler * m * m)[:, None, None]
+                rho.view(-1).index_add_(0, flat.flatten(), area.flatten())
+            else:
+                for k, sel in enumerate((~g.filler, g.filler)):
+                    rho[k] += px[sel].T @ fp["y"][sel]
+        return rho
 
     @torch.no_grad()
     def evaluate(self, centers: torch.Tensor, alpha: float | None = None):
         """Energy, its gradient w.r.t. the centers, the overflow and, if `alpha`
         is given, the local density terms (see `local_terms`)."""
-        n, s, big = self.num_cells, self.small, self.large
         fp = self._footprints(centers, slopes=alpha is not None)
-        rho_cells = self._map(fp, s < n, big < n)
-        rho = rho_cells + self._map(fp, s >= n, big >= n) + self.fixed_rho
+        rho_cells, rho_fillers = self._map(fp)
+        rho = rho_cells + rho_fillers + self.fixed_rho
 
         d, sn = self.dct, self.dst
         coeffs = d @ rho @ d.T
@@ -209,7 +241,7 @@ class Density:
         # that gradient jumps whenever an object edge crosses a bin boundary,
         # which breaks Nesterov's Lipschitz step prediction.)
         energy = 0.5 * self.bin_area * (coeffs**2 * self.inv_w2).sum()
-        grad = -self.bin_area * torch.stack([self._gather(fp, e_x), self._gather(fp, e_y)], 1)
+        grad = -self.bin_area * self._gather(fp, e_x, e_y)
 
         # Overflow tau: movable cell area in excess of each bin's available
         # (non-fixed) area at the target density, over total movable area.
@@ -236,13 +268,10 @@ class Density:
         # d nu_j / d x_i = nu_j * alpha / bin_area * d(area of i in j) / dx, weighted
         # by bin j's energy phi_j * demand_j.
         g = (alpha / self.bin_area) * nu * phi * demand
-        grad = torch.stack([
-            -self.bin_area * self._gather(fp, nu * e_x) + self.bin_area * self._gather(fp, g, x="dx"),
-            -self.bin_area * self._gather(fp, nu * e_y) + self.bin_area * self._gather(fp, g, y="dy"),
-        ], 1)
-        touched = {k: (fp[k] > 0).to(e_x.dtype) for k in ("sx", "sy", "lx", "ly")}
-        touched["flat"] = fp["flat"]
-        bin_overflow = self._gather(touched, excess.clamp(min=0), weighted=False) / self.movable_area
+        slope = torch.cat([self._gather(fp, g, x="dx"), self._gather(fp, g, y="dy")], 1)
+        grad = -self.bin_area * self._gather(fp, nu * e_x, nu * e_y) + self.bin_area * slope
+        touched = [{**f, "x": (f["x"] > 0).to(e_x.dtype), "y": (f["y"] > 0).to(e_x.dtype)} for f in fp]
+        bin_overflow = self._gather(touched, excess.clamp(min=0), weighted=False)[:, 0] / self.movable_area
         return grad, bin_overflow
 
     def __call__(self, centers: torch.Tensor, alpha: float | None = None):

@@ -77,8 +77,9 @@ Implementation notes:
   crosses a bin boundary. That breaks Nesterov's Lipschitz step prediction, and
   placement then stalls at about 20% overflow.
 - **Density map:** a rectangle's overlap with a bin factorizes into
-  x-overlap × y-overlap. Standard cells and fillers (span ≤ 4 bins) use a 5×5
-  window of bins; macros use dense overlaps with every bin (`ρ = Oxᵀ·Oy`).
+  x-overlap × y-overlap. Standard cells and fillers use a 3×3 window of bins
+  (span ≤ 2 bins, nearly all of them) or a 5×5 one (span ≤ 4); macros use dense
+  overlaps with every bin (`ρ = Oxᵀ·Oy`).
 - **DCT:** computed as products with precomputed M×M cosine/sine matrices.
 - **Constants** not given in the paper are taken from ePlace and the open-source
   RePlAce and noted in comments: the γ schedule, cof ∈ [0.95, 1.05], the
