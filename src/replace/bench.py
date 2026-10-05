@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from .generate import generate
 from .placer import PlacerConfig, global_place
-from .plot import plot_history, plot_placement
+from .plot import plot_result
 from .wirelength import hpwl
 
 DEFAULT_SIZES = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
@@ -59,9 +59,7 @@ def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=("default", "ds
                 flush=True,
             )
             if plots:
-                name = f"{out_dir}/{design.name}_{mode}"
-                plot_placement(design, res.pos, f"{name}.png", res.filler_pos, res.filler_size, f"{design.name} ({mode})")
-                plot_history(res.history, f"{name}_history.png", f"{design.name} ({mode})")
+                plot_result(design, res, f"{out_dir}/{design.name}_{mode}.png", f"{design.summary()}  [{mode}]")
             write_tables(rows, out_dir)
     return rows
 

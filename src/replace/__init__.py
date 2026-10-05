@@ -23,7 +23,7 @@ def main() -> None:
     p = sub.add_parser("place", help="place one random design")
     p.add_argument("--cells", type=int, default=10000)
     p.add_argument("--macros", type=int, default=0)
-    p.add_argument("--plot", help="write placement and convergence plots with this path prefix")
+    p.add_argument("--plot", help="write the result figure to this .png path prefix")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--ds", action="store_true", help="dynamic step size adaptation (RePlAce -ds)")
     placer_args(p)
@@ -39,7 +39,7 @@ def main() -> None:
     cfg = PlacerConfig(target_density=args.target_density, max_iters=args.max_iters, seed=args.seed)
 
     if args.cmd == "place":
-        from .plot import plot_history, plot_placement
+        from .plot import plot_result
 
         design = generate(args.cells, args.macros, movable_macros=not args.fixed_macros, seed=args.seed)
         print(design.summary())
@@ -53,8 +53,7 @@ def main() -> None:
             f"{res.time_initial:.1f}s initial + {res.time_global:.1f}s global placement"
         )
         if args.plot:
-            plot_placement(design, res.pos, f"{args.plot}.png", res.filler_pos, res.filler_size)
-            plot_history(res.history, f"{args.plot}_history.png", design.name)
+            plot_result(design, res, f"{args.plot}.png")
     else:
         from . import bench
 

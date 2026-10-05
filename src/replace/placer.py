@@ -54,6 +54,8 @@ class PlaceResult:
     pos: torch.Tensor  # (n, 2) final object centers
     filler_pos: torch.Tensor  # (f, 2)
     filler_size: torch.Tensor  # (f, 2)
+    initial_pos: torch.Tensor  # (n, 2) object centers when the Nesterov loop starts
+    initial_filler_pos: torch.Tensor  # (f, 2)
     hpwl: float
     overflow: float
     iterations: int  # actual placement only
@@ -195,6 +197,8 @@ def global_place(design: Design, cfg: PlacerConfig = PlacerConfig()) -> PlaceRes
         pos=prob.full_pos(opt.v),
         filler_pos=opt.v[prob.num_movable :],
         filler_size=prob.filler_size,
+        initial_pos=prob.full_pos(prob.x0),
+        initial_filler_pos=prob.x0[prob.num_movable :],
         hpwl=opt.stats["hpwl"],
         overflow=opt.stats["overflow"],
         iterations=len(history) - 1,
