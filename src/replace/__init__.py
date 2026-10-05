@@ -26,12 +26,13 @@ def main() -> None:
     p.add_argument("--plot", help="write the result figure to this .png path prefix")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--ds", action="store_true", help="dynamic step size adaptation (RePlAce -ds)")
+    p.add_argument("--ld", action="store_true", help="constraint-oriented local density function (RePlAce -ld)")
     placer_args(p)
 
     b = sub.add_parser("bench", help="benchmark on random designs of increasing size")
     b.add_argument("--sizes", type=lambda s: [int(x) for x in s.split(",")], help="comma-separated cell counts")
     b.add_argument("--out", default="benchmarks/results")
-    b.add_argument("--modes", default="default,ds", help="comma-separated placer variants: default, ds")
+    b.add_argument("--modes", default="default,ds,ld,ldds", help="comma-separated placer variants: default, ds, ld, ldds")
     b.add_argument("--no-plots", action="store_true")
     placer_args(b)
 
@@ -46,6 +47,7 @@ def main() -> None:
         ref = hpwl(design, design.pos)
         cfg.log_every = args.log_every
         cfg.dynamic_step = args.ds
+        cfg.local_density = args.ld
         res = global_place(design, cfg)
         print(
             f"HPWL {res.hpwl:.4e} ({res.hpwl / ref:.3f} x reference {ref:.4e}), overflow {res.overflow:.3f}, "

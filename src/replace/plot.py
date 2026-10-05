@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 from matplotlib.collections import PolyCollection  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 from .design import Design  # noqa: E402
 from .placer import PlaceResult  # noqa: E402
@@ -27,13 +28,18 @@ def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tens
     if len(filler_pos):
         ax.add_collection(PolyCollection(_rects(filler_pos.detach().float(), filler_size.float()), facecolor="tab:green", edgecolor="none", alpha=0.25))
     groups = [
-        (design.movable & ~design.macro, dict(facecolor="tab:red", edgecolor="none", alpha=0.6)),
-        (design.movable & design.macro, dict(facecolor="tab:blue", edgecolor="navy", lw=0.5, alpha=0.4)),
-        (design.fixed & design.macro, dict(facecolor="gray", edgecolor="black", lw=0.5, alpha=0.5)),
+        ("cells", design.movable & ~design.macro, dict(facecolor="tab:red", edgecolor="none", alpha=0.6)),
+        ("movable macros", design.movable & design.macro, dict(facecolor="tab:blue", edgecolor="navy", lw=0.5, alpha=0.4)),
+        ("fixed macros", design.fixed & design.macro, dict(facecolor="gray", edgecolor="black", lw=0.5, alpha=0.5)),
     ]
-    for mask, style in groups:
+    legend = []
+    if len(filler_pos):
+        legend.append(Patch(facecolor="tab:green", alpha=0.4, label="fillers"))
+    for label, mask, style in groups:
         if mask.any():
             ax.add_collection(PolyCollection(_rects(pos[mask], size[mask]), **style))
+            legend.append(Patch(**style, label=label))
+    ax.legend(handles=legend, loc="upper right", fontsize=8, framealpha=0.9)
     ax.set_xlim(xl, xh)
     ax.set_ylim(yl, yh)
     ax.set_aspect("equal")
@@ -44,7 +50,7 @@ def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
     fig = plt.figure(figsize=(14, 13), layout="constrained")
     grid = fig.add_gridspec(3, 2, height_ratios=[3, 1, 1])
     draw_placement(fig.add_subplot(grid[0, 0]), design, res.initial_pos, res.initial_filler_pos, res.filler_size,
-                   f"before: initial placement, HPWL {res.history[0]['hpwl']:.4g}")
+                   f"before: initial placement, HPWL {res.history[0]['hpwl']:.4g}, overflow {res.history[0]['overflow']:.3f}")
     draw_placement(fig.add_subplot(grid[0, 1]), design, res.pos, res.filler_pos, res.filler_size,
                    f"after: {res.iterations} iterations, HPWL {res.hpwl:.4g}, overflow {res.overflow:.3f}")
 

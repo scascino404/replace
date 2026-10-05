@@ -9,10 +9,13 @@ shrinks, spreading objects until the density overflow reaches the target.
 
 With dynamic step size adaptation (-ds), a trial placement first records the
 HPWL curve, which then sets how fast lambda may grow in the actual placement.
+With the local density function (-ld), objects in overflowed bins get extra,
+per-object weighted density forces:  f + sum_i Delta_i * D_local.
 """
 
 import math
 import time
+import warnings
 from dataclasses import dataclass, field
 
 import torch
@@ -32,8 +35,11 @@ class PlacerConfig:
     max_iters: int = 3000
     initial_place_rounds: int = 20
     bins: int | None = None  # bins per side; None picks it from the design
-    # lambda_0 = init_density_penalty * |grad W|_1 / |grad D|_1  (RePlAce default)
-    init_density_penalty: float = 8e-5
+    # lambda_0 = init_density_penalty * |grad W|_1 / |grad D|_1. RePlAce uses
+    # 8e-5; with it our runs spend their first ~200 iterations growing lambda
+    # before cells start to spread (unlike the paper's Fig. 5), and -ds can stall
+    # in its slow first phase. 100x larger gives the same HPWL in fewer iterations.
+    init_density_penalty: float = 8e-3
     # Per-iteration lambda multiplier range [cof_min, cof_max] (Algorithm 2).
     cof_min: float = 0.95
     cof_max: float = 1.05
@@ -45,6 +51,13 @@ class PlacerConfig:
     dynamic_step: bool = False
     # The trial stops at overflow <= initial overflow / trial_overflow_divisor.
     trial_overflow_divisor: float = 2.5
+    # Constraint-oriented local density function (-ld). alpha scales the
+    # per-bin penalty nu_j = exp(alpha * overflow_j / bin area); beta the growth
+    # of the per-object coefficients Delta_i. Both start at these values (beta
+    # relative to the initial lambda) and grow with lambda's multiplier.
+    local_density: bool = False
+    ld_alpha: float = 1e-12
+    ld_beta: float = 1.0
     seed: int = 0
     log_every: int = 0  # print progress every N iterations (0: silent)
 
@@ -125,6 +138,7 @@ class _Problem:
 
         self.delta_hpwl_ref = cfg.delta_hpwl_ref or 0.075 * design.num_nets * self.bin_size
         self.init_density_penalty = cfg.init_density_penalty
+        self.cfg = cfg
         self.reset()
 
     def reset(self) -> None:
@@ -136,6 +150,19 @@ class _Problem:
         (g_wl,) = torch.autograd.grad(wa_wirelength(self.design, self.full_pos(x), self.gamma), x)
         (g_d,) = torch.autograd.grad(energy, x)
         self.lam = self.init_density_penalty * g_wl.abs().sum().item() / g_d.abs().sum().clamp(min=1e-30).item()
+        # Local density state (-ld): Delta_i starts at 0 (Eq. 3).
+        self.alpha = self.cfg.ld_alpha
+        self.beta = self.cfg.ld_beta * self.lam
+        self.delta = torch.zeros(len(self.x0), dtype=self.x0.dtype)
+
+    def update_penalties(self, multiplier: float, stats: dict) -> None:
+        """After an iteration: scale lambda (and alpha, beta, which grow at the
+        same rate), and accumulate each object's local density coefficient."""
+        self.lam *= multiplier
+        if self.cfg.local_density:
+            self.delta += self.beta * stats["bin_overflow"]  # Eq. 3 / Algorithm 1
+            self.alpha = min(self.alpha * multiplier, 1e5)  # cap as in the original code
+            self.beta *= multiplier
 
     def full_pos(self, x: torch.Tensor) -> torch.Tensor:
         return self.base_pos.index_put((self.mov_idx,), x[: self.num_movable])
@@ -147,11 +174,17 @@ class _Problem:
         """Preconditioned gradient of f at x plus HPWL/overflow/potential statistics."""
         x = x.detach().requires_grad_()
         pos = self.full_pos(x)
-        energy, overflow = self.density(x)
+        ld = self.cfg.local_density
+        energy, overflow, *local = self.density(x, self.alpha if ld else None)
         f = wa_wirelength(self.design, pos, self.gamma) + self.lam * energy
         (grad,) = torch.autograd.grad(f, x)
+        stats = {"hpwl": hpwl(self.design, pos), "overflow": overflow, "energy": energy.item()}
+        if ld:
+            # Eq. 9: each object's local density gradient scaled by its Delta_i.
+            local_grad, stats["bin_overflow"] = local[0]
+            grad = grad + self.delta[:, None] * local_grad
         precond = (self.num_pins + self.lam * self.area).clamp(min=1.0)
-        return grad / precond[:, None], {"hpwl": hpwl(self.design, pos), "overflow": overflow, "energy": energy.item()}
+        return grad / precond[:, None], stats
 
 
 def _nesterov_run(prob: _Problem, cfg: PlacerConfig, stop_overflow: float, schedule: DynamicStepSize | None, tag: str):
@@ -160,12 +193,13 @@ def _nesterov_run(prob: _Problem, cfg: PlacerConfig, stop_overflow: float, sched
     prob.reset()
     opt = Nesterov(prob.x0, prob.evaluate, prob.project, initial_move=0.1 * prob.bin_size)
     prev_hpwl = opt.stats["hpwl"]
-    history = [dict(iter=0, **opt.stats, lam=prob.lam, gamma=prob.gamma, cof_max=cfg.cof_max)]
+    scalars = lambda stats: {k: v for k, v in stats.items() if isinstance(v, float)}  # noqa: E731
+    history = [dict(iter=0, **scalars(opt.stats), lam=prob.lam, gamma=prob.gamma, cof_max=cfg.cof_max)]
     for it in range(1, cfg.max_iters + 1):
         opt.step()
         cur_hpwl, overflow = opt.stats["hpwl"], opt.stats["overflow"]
         cof_max = schedule.cof_max(cur_hpwl, opt.stats["energy"]) if schedule else cfg.cof_max
-        history.append(dict(iter=it, **opt.stats, lam=prob.lam, gamma=prob.gamma, cof_max=cof_max))
+        history.append(dict(iter=it, **scalars(opt.stats), lam=prob.lam, gamma=prob.gamma, cof_max=cof_max))
         if cfg.log_every and it % cfg.log_every == 0:
             print(f"  {tag} iter {it:5d}  hpwl {cur_hpwl:.4e}  overflow {overflow:.3f}  lambda {prob.lam:.3e}  cof_max {cof_max:.4f}")
         if overflow <= stop_overflow:
@@ -173,8 +207,10 @@ def _nesterov_run(prob: _Problem, cfg: PlacerConfig, stop_overflow: float, sched
         if math.isnan(cur_hpwl):
             raise FloatingPointError("placement diverged")
         prob.gamma = wa_gamma(overflow, prob.bin_size)
-        prob.lam *= lambda_multiplier(cur_hpwl - prev_hpwl, prob.delta_hpwl_ref, cfg.cof_min, cof_max)
+        prob.update_penalties(lambda_multiplier(cur_hpwl - prev_hpwl, prob.delta_hpwl_ref, cfg.cof_min, cof_max), opt.stats)
         prev_hpwl = cur_hpwl
+    else:
+        warnings.warn(f"{tag}: overflow {overflow:.3f} > {stop_overflow:.3f} after max_iters={cfg.max_iters}")
     return opt, history
 
 

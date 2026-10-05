@@ -71,6 +71,14 @@ def overlap(center: torch.Tensor, half: torch.Tensor, lo: torch.Tensor, hi: torc
     return (torch.minimum(center[:, None] + half[:, None], hi) - torch.maximum(center[:, None] - half[:, None], lo)).clamp(min=0)
 
 
+def overlap_slope(center: torch.Tensor, half: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
+    """Derivative of `overlap` w.r.t. the center: +1 where only the interval's
+    right end lies inside the bin, -1 where only its left end does."""
+    c, h = center[:, None], half[:, None]
+    inside = overlap(center, half, lo, hi) > 0
+    return ((c + h < hi).to(c.dtype) - (c - h > lo).to(c.dtype)) * inside
+
+
 class Density:
     """Density penalty for a fixed set of movable objects (cells, then fillers).
 
@@ -130,39 +138,63 @@ class Density:
         self.wv_w2 = (w_v[None, :] * inv).to(sizes.dtype)
 
     def _window(self, center: torch.Tensor, half: torch.Tensor, axis: int):
-        """Bin indices (k, WINDOW) and overlaps (k, WINDOW) of small objects
-        along one axis, over the WINDOW bins starting at each object's first bin."""
+        """Bin indices, lower bin edges (both (k, WINDOW)) of the WINDOW bins
+        starting at each small object's first bin along one axis."""
         size = self.bin_size[axis]
         first = ((center - half - self.origin[axis]) / size).floor().long().clamp(0, self.bins - 1)
         idx = first[:, None] + torch.arange(WINDOW)
-        lo = self.origin[axis] + idx * size
         # Bins past the die edge get zero overlap; clamp their index to stay valid.
-        return idx.clamp(max=self.bins - 1), overlap(center, half, lo, lo + size)
+        return idx.clamp(max=self.bins - 1), self.origin[axis] + idx * size
+
+    def _footprints(self, centers: torch.Tensor, slopes: bool = False) -> dict:
+        """Per-axis overlaps of every object with the bins: small objects over
+        their WINDOW bins ("sx", "sy", flattened 2-D bin indices "flat"), large
+        ones over all bins ("lx", "ly"). Rectangle/bin overlap area factorizes
+        into x-overlap * y-overlap; x-overlaps include the object's weight.
+        With slopes, also the derivatives of the x/y-overlaps w.r.t. the center."""
+        s, big, m = self.small, self.large, self.bins
+        fp = {}
+        for axis, name in ((0, "x"), (1, "y")):
+            c, h = centers[s, axis], self.half[s, axis]
+            idx, lo = self._window(c, h, axis)
+            hi = lo + self.bin_size[axis]
+            fp["s" + name], fp["s_idx" + name] = overlap(c, h, lo, hi), idx
+            cb, hb = centers[big, axis], self.half[big, axis]
+            fp["l" + name] = overlap(cb, hb, self.lo[axis], self.hi[axis])
+            if slopes:
+                fp["sd" + name] = overlap_slope(c, h, lo, hi)
+                fp["ld" + name] = overlap_slope(cb, hb, self.lo[axis], self.hi[axis])
+        fp["flat"] = fp.pop("s_idxx")[:, :, None] * m + fp.pop("s_idxy")[:, None, :]
+        return fp
+
+    def _gather(self, fp: dict, field: torch.Tensor, x: str = "x", y: str = "y", weighted: bool = True) -> torch.Tensor:
+        """(k,) per object: sum over bins of weight * x-part * y-part * field,
+        where the parts are the overlaps (or slopes, x="dx"...) in `fp`."""
+        s, big = self.small, self.large
+        out = field.new_empty(len(self.half))
+        sx, lx = fp["s" + x], fp["l" + x]
+        if weighted:
+            sx, lx = sx * self.weight[s, None], lx * self.weight[big, None]
+        out[s] = ((sx[:, :, None] * fp["s" + y][:, None, :]) * field.flatten()[fp["flat"]]).sum((1, 2))
+        out[big] = ((lx @ field) * fp["l" + y]).sum(1)
+        return out
+
+    def _map(self, fp: dict, small_mask: torch.Tensor, big_mask: torch.Tensor) -> torch.Tensor:
+        """(M, M) density map of the selected objects."""
+        m = self.bins
+        s, big = self.small, self.large
+        area = (fp["sx"] * self.weight[s, None])[small_mask][:, :, None] * fp["sy"][small_mask][:, None, :]
+        rho = area.new_zeros(m * m).index_add_(0, fp["flat"][small_mask].flatten(), area.flatten())
+        return rho.view(m, m) + (fp["lx"] * self.weight[big, None])[big_mask].T @ fp["ly"][big_mask]
 
     @torch.no_grad()
-    def evaluate(self, centers: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, float]:
-        """Energy, its gradient w.r.t. the centers, and the overflow."""
-        m, n = self.bins, self.num_cells
-        s, big = self.small, self.large
-
-        # Small objects: overlap area with each bin of their WINDOW x WINDOW
-        # window (area factorizes into x-overlap * y-overlap), scattered into
-        # the flattened bin grid.
-        ix, ox = self._window(centers[s, 0], self.half[s, 0], 0)
-        iy, oy = self._window(centers[s, 1], self.half[s, 1], 1)
-        flat = ix[:, :, None] * m + iy[:, None, :]
-        area = (ox * self.weight[s, None])[:, :, None] * oy[:, None, :]
-
-        # Large objects: overlaps with every bin; the map is one matmul.
-        bx = overlap(centers[big, 0], self.half[big, 0], self.lo[0], self.hi[0]) * self.weight[big, None]
-        by = overlap(centers[big, 1], self.half[big, 1], self.lo[1], self.hi[1])
-
-        def density_map(small_mask: torch.Tensor, big_mask: torch.Tensor) -> torch.Tensor:
-            rho = centers.new_zeros(m * m).index_add_(0, flat[small_mask].flatten(), area[small_mask].flatten())
-            return rho.view(m, m) + bx[big_mask].T @ by[big_mask]
-
-        rho_cells = density_map(s < n, big < n)
-        rho = rho_cells + density_map(s >= n, big >= n) + self.fixed_rho
+    def evaluate(self, centers: torch.Tensor, alpha: float | None = None):
+        """Energy, its gradient w.r.t. the centers, the overflow and, if `alpha`
+        is given, the local density terms (see `local_terms`)."""
+        n, s, big = self.num_cells, self.small, self.large
+        fp = self._footprints(centers, slopes=alpha is not None)
+        rho_cells = self._map(fp, s < n, big < n)
+        rho = rho_cells + self._map(fp, s >= n, big >= n) + self.fixed_rho
 
         d, sn = self.dct, self.dst
         coeffs = d @ rho @ d.T
@@ -177,21 +209,47 @@ class Density:
         # that gradient jumps whenever an object edge crosses a bin boundary,
         # which breaks Nesterov's Lipschitz step prediction.)
         energy = 0.5 * self.bin_area * (coeffs**2 * self.inv_w2).sum()
-        grad = torch.empty_like(centers)
-        for axis, e in enumerate((e_x, e_y)):
-            grad[s, axis] = -self.bin_area * (area * e.flatten()[flat]).sum((1, 2))
-            grad[big, axis] = -self.bin_area * ((bx @ e) * by).sum(1)
+        grad = -self.bin_area * torch.stack([self._gather(fp, e_x), self._gather(fp, e_y)], 1)
 
         # Overflow tau: movable cell area in excess of each bin's available
         # (non-fixed) area at the target density, over total movable area.
         excess = rho_cells * self.bin_area - self.target_density * self.free_area
         overflow = excess.clamp(min=0).sum().item() / self.movable_area
-        return energy, grad, overflow
+        if alpha is None:
+            return energy, grad, overflow
+        phi = d.T @ (coeffs * self.inv_w2) @ d
+        return energy, grad, overflow, self.local_terms(fp, alpha, excess, rho_cells, phi, e_x, e_y)
 
-    def __call__(self, centers: torch.Tensor) -> tuple[torch.Tensor, float]:
-        """(energy, overflow); the energy back-propagates the electrostatic gradient."""
-        energy, grad, overflow = self.evaluate(centers.detach())
-        return _Energy.apply(centers, energy, grad), overflow
+    def local_terms(self, fp, alpha, excess, rho_cells, phi, e_x, e_y):
+        """RePlAce local density function (Section III, Eqs. 2, 3, 5, 8).
+
+        Each bin gets a penalty factor nu_j = exp(alpha * overflow_j / bin area)
+        (Eq. 2), large in overflowed bins. Returns
+          * the gradient of D_local (Eq. 8, as in the original code): the
+            electrostatic force reweighted per bin by nu_j, plus the change of
+            nu_j as the object moves its area in or out of bin j;
+          * per object, the overflow of the bins it touches over the total
+            movable area, which accumulates into its coefficient Delta_i (Eq. 3).
+        """
+        nu = torch.exp((alpha * excess / self.bin_area).clamp(max=50.0))
+        demand = rho_cells * self.bin_area
+        # d nu_j / d x_i = nu_j * alpha / bin_area * d(area of i in j) / dx, weighted
+        # by bin j's energy phi_j * demand_j.
+        g = (alpha / self.bin_area) * nu * phi * demand
+        grad = torch.stack([
+            -self.bin_area * self._gather(fp, nu * e_x) + self.bin_area * self._gather(fp, g, x="dx"),
+            -self.bin_area * self._gather(fp, nu * e_y) + self.bin_area * self._gather(fp, g, y="dy"),
+        ], 1)
+        touched = {k: (fp[k] > 0).to(e_x.dtype) for k in ("sx", "sy", "lx", "ly")}
+        touched["flat"] = fp["flat"]
+        bin_overflow = self._gather(touched, excess.clamp(min=0), weighted=False) / self.movable_area
+        return grad, bin_overflow
+
+    def __call__(self, centers: torch.Tensor, alpha: float | None = None):
+        """(energy, overflow[, local terms]); the energy back-propagates the
+        electrostatic gradient."""
+        energy, grad, *rest = self.evaluate(centers.detach(), alpha)
+        return _Energy.apply(centers, energy, grad), *rest
 
 
 class _Energy(torch.autograd.Function):

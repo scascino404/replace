@@ -10,9 +10,14 @@ from .placer import PlacerConfig, global_place
 from .plot import plot_result
 from .wirelength import hpwl
 
-DEFAULT_SIZES = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
+DEFAULT_SIZES = [1000, 2000, 5000, 10000, 20000, 50000]
 # Placer variants, named after the RePlAce command-line suffixes.
-MODES = {"default": {}, "ds": {"dynamic_step": True}}
+MODES = {
+    "default": {},
+    "ds": {"dynamic_step": True},
+    "ld": {"local_density": True},
+    "ldds": {"local_density": True, "dynamic_step": True},
+}
 
 
 def macros_for(num_cells: int) -> int:
@@ -20,7 +25,7 @@ def macros_for(num_cells: int) -> int:
     return max(0, round(4 * math.log2(num_cells / 1000)))
 
 
-def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=("default", "ds"), movable_macros=True, seed=0, cfg=PlacerConfig(), plots=True) -> list[dict]:
+def run(sizes=DEFAULT_SIZES, out_dir="benchmarks/results", modes=("default", "ds", "ld", "ldds"), movable_macros=True, seed=0, cfg=PlacerConfig(), plots=True) -> list[dict]:
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     for n in sizes:
