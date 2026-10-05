@@ -1,4 +1,4 @@
-# RePlAce in PyTorch
+# RePlAce
 
 A small, readable implementation of the RePlAce global placer
 (Cheng, Kahng, Kang, Wang, *"RePlAce: Advancing Solution Quality and Routability
