@@ -10,7 +10,7 @@ both need tools outside RePlAce (a legalizer / detailed placer and a global rout
 
 ## Example output
 
-![Global placement of a random 20k-cell design with dynamic step size adaptation](docs/example.png)
+<img src="docs/example.png" width="480" alt="Global placement of a random 20k-cell design with dynamic step size adaptation">
 
 Every placement run can write a figure like this one, produced by
 
@@ -51,32 +51,34 @@ and mode to `benchmarks/results/`.
 
 ## Animation
 
-![Cells and macros spreading out during global placement of a random 3k-cell design](docs/placement.gif)
+<img src="docs/placement.gif" width="480" alt="Cells and macros spreading out during global placement of a random 3k-cell design">
 
 A placement run can also write an animated GIF of the actual placement (with
 `-ds`, the trial placement is not shown). This one comes from
 
-    uv run replace place --cells 3000 --macros 4 --ds --gif docs/placement
+    uv run replace place --cells 3000 --macros 4 --ds --gif docs/placement --gif-dpi 80
 
 The clump from the initial placement spreads while the macros separate, and the
-red cursor follows the HPWL and overflow curves. Cells barely move while λ is
-still small and spread quickly later, so frames are taken at evenly spaced
-overflow values rather than evenly spaced iterations.
+red cursor follows the HPWL and overflow curves. The pace varies a lot: the
+clump spreads quickly in the first ~30 iterations, then barely moves while λ
+is still small, and spreads steadily later. Frames are therefore picked by
+movement rather than by iteration, so that objects and fillers move by about
+the same mean distance between consecutive frames.
 
 The animation is off by default. Its settings:
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--gif PREFIX` | off | write `PREFIX.gif` |
-| `--gif-frames` | 80 | number of frames |
+| `--gif-frames` | 80 | maximum number of frames |
 | `--gif-fps` | 12 | frames per second |
-| `--gif-hold` | 1.5 | seconds to hold the first and last frame |
+| `--gif-hold` | 1.5 | seconds to hold the last frame (the first is held a third of that) |
 | `--gif-dpi` | 100 | resolution of the 6 × 8.2 in figure (600 × 820 px at 100) |
 | `--gif-every` | 1 | keep the positions every N iterations to choose frames from |
 
 Snapshots of all objects and fillers are kept in memory during the run. For
 large designs, raise `--gif-every`. A small design also keeps individual
-cells visible and the file size manageable (2.9 MB here). From Python, set
+cells visible and the file size manageable (2.3 MB here). From Python, set
 `PlacerConfig.snapshot_every` and call `replace.plot.animate(design, result, path)`.
 
 ## Algorithm

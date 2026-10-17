@@ -25,9 +25,9 @@ def main() -> None:
     p.add_argument("--macros", type=int, default=0)
     p.add_argument("--plot", help="write the result figure to this .png path prefix")
     p.add_argument("--gif", help="write an animation of the placement to this .gif path prefix")
-    p.add_argument("--gif-frames", type=int, default=80, help="frames, picked at evenly spaced overflow values (default 80)")
+    p.add_argument("--gif-frames", type=int, default=80, help="frames, picked so that objects move about equally between frames (default 80)")
     p.add_argument("--gif-fps", type=int, default=12, help="frames per second (default 12)")
-    p.add_argument("--gif-hold", type=float, default=1.5, help="seconds to hold the first and last frame (default 1.5)")
+    p.add_argument("--gif-hold", type=float, default=1.5, help="seconds to hold the last frame; the first is held a third of that (default 1.5)")
     p.add_argument("--gif-dpi", type=int, default=100, help="resolution; the figure is 6 x 8.2 inches (default 100)")
     p.add_argument("--gif-every", type=int, default=1,
                    help="keep the placement every N iterations to pick frames from (default 1; raise it to save memory on large designs)")

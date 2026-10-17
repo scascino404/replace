@@ -99,29 +99,45 @@ def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
 def animate(design: Design, res: PlaceResult, path: str, title: str = "", frames: int = 80, fps: int = 12, hold: float = 1.5, dpi: int = 100):
     """Animated GIF of the actual placement, from res.snapshots (PlacerConfig.snapshot_every).
 
-    Cells barely move while lambda is still small and spread quickly later, so
-    frames are picked at evenly spaced overflow values instead of evenly spaced
-    iterations. The first and last frames are held for `hold` seconds. All
-    frames share one undithered palette, which keeps the file ~30% smaller than
-    per-frame palettes.
+    The pace of the placement varies a lot (fast spreading right after the
+    initial placement, a near standstill while lambda is small, steady spreading
+    later), so frames are picked by movement rather than by iteration: objects
+    and fillers move by about the same mean distance between consecutive frames.
+    The last frame is held for `hold` seconds and the first for a third of
+    that, so the loop restarts without a long pause. All frames share one
+    undithered palette, which keeps the file ~30% smaller than per-frame
+    palettes.
     """
     from PIL import Image  # a matplotlib dependency
 
-    if not res.snapshots:
+    snaps = res.snapshots
+    if not snaps:
         raise ValueError("no snapshots: run the placer with PlacerConfig.snapshot_every > 0")
-    # Each target overflow takes the first snapshot at or below it (running
-    # minimum, as overflow is not strictly decreasing), plus the final one.
-    ovf = torch.tensor([res.history[it]["overflow"] for it, _, _ in res.snapshots])
-    running_min = ovf.cummin(0).values
-    targets = torch.linspace(ovf[0].item(), ovf[-1].item(), max(frames, 2), dtype=ovf.dtype)
-    picks = torch.searchsorted(-running_min, -targets).clamp(max=len(ovf) - 1)
-    picks = sorted(set(picks.tolist()) | {0, len(ovf) - 1})
+    n = len(snaps[0][1]) + len(snaps[0][2])
+
+    def dist(a, b):  # mean distance moved by objects and fillers from snapshot a to b
+        (_, pa, fa), (_, pb, fb) = snaps[a], snaps[b]
+        return ((pb - pa).norm(dim=1).sum() + (fb - fa).norm(dim=1).sum()).item() / n
+
+    def pick(step):  # greedy: next frame once the mean distance from the last frame reaches step, plus the final one
+        out = [0]
+        for k in range(1, len(snaps)):
+            if dist(out[-1], k) >= step:
+                out.append(k)
+        return sorted(set(out) | {len(snaps) - 1})
+
+    # Bisect for the smallest step that gives at most `frames` frames.
+    lo, hi = 0.0, max(dist(0, k) for k in range(len(snaps))) + 1e-6
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if len(pick(mid)) <= frames else (mid, hi)
+    picks = pick(hi)
 
     fig = Figure(figsize=(6, 8.2), dpi=dpi, layout="constrained")
     canvas = FigureCanvasAgg(fig)
     grid = fig.add_gridspec(3, 1, height_ratios=[6, 1.1, 1.1])
     ax = fig.add_subplot(grid[0])
-    _, pos, filler_pos = res.snapshots[0]
+    _, pos, filler_pos = snaps[0]
     move = draw_placement(ax, design, pos, filler_pos, res.filler_size, "")
     ax_hpwl = fig.add_subplot(grid[1])
     ax_ovf = fig.add_subplot(grid[2], sharex=ax_hpwl)
@@ -142,7 +158,7 @@ def animate(design: Design, res: PlaceResult, path: str, title: str = "", frames
 
     images = []
     for k in picks:
-        it, pos, filler_pos = res.snapshots[k]
+        it, pos, filler_pos = snaps[k]
         h = res.history[it]
         move(pos, filler_pos)
         ax.set_title(f"iteration {it}: HPWL {h['hpwl']:.4g}, overflow {h['overflow']:.3f}")
@@ -158,5 +174,6 @@ def animate(design: Design, res: PlaceResult, path: str, title: str = "", frames
     palette = both.quantize(colors=64, dither=Image.Dither.NONE)
     images = [im.quantize(palette=palette, dither=Image.Dither.NONE) for im in images]
     durations = [round(1000 / fps)] * len(images)
-    durations[0] = durations[-1] = round(1000 * max(hold, 1 / fps))
+    durations[0] = round(1000 * max(hold / 3, 1 / fps))
+    durations[-1] = round(1000 * max(hold, 1 / fps))
     images[0].save(path, save_all=True, append_images=images[1:], duration=durations, loop=0, optimize=True)
