@@ -60,6 +60,9 @@ class PlacerConfig:
     ld_beta: float = 1.0
     seed: int = 0
     log_every: int = 0  # print progress every N iterations (0: silent)
+    # Keep the positions every N iterations of the actual placement (0: never),
+    # e.g. for animations. The final placement is always kept when enabled.
+    snapshot_every: int = 0
 
 
 @dataclass
@@ -80,6 +83,9 @@ class PlaceResult:
     trial_iterations: int = 0  # -ds only
     trial_history: list[dict] = field(default_factory=list)
     transition_points: TransitionPoints | None = None
+    # (iteration, (n, 2) object centers, (f, 2) filler centers) in float32,
+    # every cfg.snapshot_every iterations of the actual placement.
+    snapshots: list[tuple[int, torch.Tensor, torch.Tensor]] = field(default_factory=list)
 
 
 def wa_gamma(overflow: float, bin_size: float) -> float:
@@ -184,18 +190,26 @@ class _Problem:
         return grad / precond[:, None], stats
 
 
-def _nesterov_run(prob: _Problem, stop_overflow: float, schedule: DynamicStepSize | None, tag: str):
+def _nesterov_run(prob: _Problem, stop_overflow: float, schedule: DynamicStepSize | None, tag: str, snapshot_every: int = 0):
     """One Nesterov placement from the initial placement until the overflow
-    reaches stop_overflow. Returns the optimizer and the per-iteration history."""
+    reaches stop_overflow. Returns the optimizer, the per-iteration history and
+    the position snapshots (every snapshot_every iterations plus the last one)."""
     cfg = prob.cfg
     prob.reset()
     opt = Nesterov(prob.x0, prob.evaluate, prob.project, initial_move=0.1 * prob.bin_size)
     prev_hpwl = opt.stats["hpwl"]
-    history = []
+    history, snapshots = [], []
 
     def record(it: int, cof_max: float) -> None:
         scalars = {k: v for k, v in opt.stats.items() if isinstance(v, float)}
         history.append(dict(iter=it, **scalars, lam=prob.lam, gamma=prob.gamma, cof_max=cof_max))
+        if snapshot_every and it % snapshot_every == 0:
+            snapshot(it)
+
+    def snapshot(it: int) -> None:
+        v = opt.v.detach()
+        f32 = dict(dtype=torch.float32, copy=True)
+        snapshots.append((it, prob.full_pos(v).to(**f32), v[prob.num_movable :].to(**f32)))
 
     record(0, cfg.cof_max)
     for it in range(1, cfg.max_iters + 1):
@@ -214,7 +228,9 @@ def _nesterov_run(prob: _Problem, stop_overflow: float, schedule: DynamicStepSiz
         prev_hpwl = cur_hpwl
     else:
         warnings.warn(f"{tag}: overflow {overflow:.3f} > {stop_overflow:.3f} after max_iters={cfg.max_iters}")
-    return opt, history
+    if snapshot_every and snapshots[-1][0] != it:
+        snapshot(it)
+    return opt, history, snapshots
 
 
 def global_place(design: Design, cfg: PlacerConfig = PlacerConfig()) -> PlaceResult:
@@ -227,11 +243,11 @@ def global_place(design: Design, cfg: PlacerConfig = PlacerConfig()) -> PlaceRes
         # Trial placement (tGP) with the default lambda schedule, stopped once
         # the overflow is well below its initial value (Section IV-B).
         stop = prob.initial_overflow / cfg.trial_overflow_divisor
-        _, trial = _nesterov_run(prob, max(stop, cfg.target_overflow), None, "trial")
+        _, trial, _ = _nesterov_run(prob, max(stop, cfg.target_overflow), None, "trial")
         tps = find_transition_points([h["hpwl"] for h in trial])
         schedule = DynamicStepSize(tps, [h["hpwl"] for h in trial], [h["energy"] for h in trial])
 
-    opt, history = _nesterov_run(prob, cfg.target_overflow, schedule, "place")
+    opt, history, snapshots = _nesterov_run(prob, cfg.target_overflow, schedule, "place", cfg.snapshot_every)
     return PlaceResult(
         pos=prob.full_pos(opt.v),
         filler_pos=opt.v[prob.num_movable :],
@@ -249,4 +265,5 @@ def global_place(design: Design, cfg: PlacerConfig = PlacerConfig()) -> PlaceRes
         trial_iterations=max(len(trial) - 1, 0),
         trial_history=trial,
         transition_points=tps,
+        snapshots=snapshots,
     )

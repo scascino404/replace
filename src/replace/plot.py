@@ -1,7 +1,12 @@
 """Placement result figure: placement before and after global placement, with
-the HPWL and overflow curves underneath."""
+the HPWL and overflow curves underneath. Optionally, an animated GIF of the
+placement from the snapshots taken during the run."""
 
+import textwrap
+
+import numpy as np
 import torch
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch, Rectangle
@@ -19,13 +24,17 @@ def _rects(pos: torch.Tensor, size: torch.Tensor):
 
 
 def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tensor, filler_size: torch.Tensor, title: str):
-    """Die outline, fillers (green), cells (red), movable macros (blue), fixed macros (gray)."""
+    """Die outline, fillers (green), cells (red), movable macros (blue), fixed macros (gray).
+    Returns a function move(pos, filler_pos) that redraws the objects at new positions."""
     xl, yl, xh, yh = design.die
     ax.add_patch(Rectangle((xl, yl), xh - xl, yh - yl, fill=False, lw=0.8))
-    pos, size = pos.detach().float(), design.size.float()
+    pos, size, filler_size = pos.detach().float(), design.size.float(), filler_size.float()
+    layers = []  # (collection, object mask; None for the fillers)
     # Collections skip autolim (slow for many polygons): the limits are the die.
     if len(filler_pos):
-        ax.add_collection(PolyCollection(_rects(filler_pos.detach().float(), filler_size.float()), facecolor="tab:green", edgecolor="none", alpha=0.25), autolim=False)
+        fillers = PolyCollection(_rects(filler_pos.detach().float(), filler_size), facecolor="tab:green", edgecolor="none", alpha=0.25)
+        ax.add_collection(fillers, autolim=False)
+        layers.append((fillers, None))
     groups = [
         ("cells", design.movable & ~design.macro, dict(facecolor="tab:red", edgecolor="none", alpha=0.6)),
         ("movable macros", design.movable & design.macro, dict(facecolor="tab:blue", edgecolor="navy", lw=0.5, alpha=0.4)),
@@ -36,13 +45,22 @@ def draw_placement(ax, design: Design, pos: torch.Tensor, filler_pos: torch.Tens
         legend.append(Patch(facecolor="tab:green", alpha=0.4, label="fillers"))
     for label, mask, style in groups:
         if mask.any():
-            ax.add_collection(PolyCollection(_rects(pos[mask], size[mask]), **style), autolim=False)
+            objects = PolyCollection(_rects(pos[mask], size[mask]), **style)
+            ax.add_collection(objects, autolim=False)
+            layers.append((objects, mask))
             legend.append(Patch(**style, label=label))
     ax.legend(handles=legend, loc="upper right", fontsize=8, framealpha=0.9)
     ax.set_xlim(xl, xh)
     ax.set_ylim(yl, yh)
     ax.set_aspect("equal")
     ax.set_title(title)
+
+    def move(pos: torch.Tensor, filler_pos: torch.Tensor) -> None:
+        pos, filler_pos = pos.detach().float(), filler_pos.detach().float()
+        for coll, mask in layers:
+            coll.set_verts(_rects(filler_pos, filler_size) if mask is None else _rects(pos[mask], size[mask]))
+
+    return move
 
 
 def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
@@ -76,3 +94,69 @@ def plot_result(design: Design, res: PlaceResult, path: str, title: str = ""):
         ax.grid(alpha=0.3)
     fig.suptitle(title or design.summary())
     fig.savefig(path, dpi=DPI)
+
+
+def animate(design: Design, res: PlaceResult, path: str, title: str = "", frames: int = 80, fps: int = 12, hold: float = 1.5, dpi: int = 100):
+    """Animated GIF of the actual placement, from res.snapshots (PlacerConfig.snapshot_every).
+
+    Cells barely move while lambda is still small and spread quickly later, so
+    frames are picked at evenly spaced overflow values instead of evenly spaced
+    iterations. The first and last frames are held for `hold` seconds. All
+    frames share one undithered palette, which keeps the file ~30% smaller than
+    per-frame palettes.
+    """
+    from PIL import Image  # a matplotlib dependency
+
+    if not res.snapshots:
+        raise ValueError("no snapshots: run the placer with PlacerConfig.snapshot_every > 0")
+    # Each target overflow takes the first snapshot at or below it (running
+    # minimum, as overflow is not strictly decreasing), plus the final one.
+    ovf = torch.tensor([res.history[it]["overflow"] for it, _, _ in res.snapshots])
+    running_min = ovf.cummin(0).values
+    targets = torch.linspace(ovf[0].item(), ovf[-1].item(), max(frames, 2), dtype=ovf.dtype)
+    picks = torch.searchsorted(-running_min, -targets).clamp(max=len(ovf) - 1)
+    picks = sorted(set(picks.tolist()) | {0, len(ovf) - 1})
+
+    fig = Figure(figsize=(6, 8.2), dpi=dpi, layout="constrained")
+    canvas = FigureCanvasAgg(fig)
+    grid = fig.add_gridspec(3, 1, height_ratios=[6, 1.1, 1.1])
+    ax = fig.add_subplot(grid[0])
+    _, pos, filler_pos = res.snapshots[0]
+    move = draw_placement(ax, design, pos, filler_pos, res.filler_size, "")
+    ax_hpwl = fig.add_subplot(grid[1])
+    ax_ovf = fig.add_subplot(grid[2], sharex=ax_hpwl)
+    it = [h["iter"] for h in res.history]
+    cursors = []
+    for a, key in ((ax_hpwl, "hpwl"), (ax_ovf, "overflow")):
+        a.plot(it, [h[key] for h in res.history], lw=1)
+        cursors.append(a.axvline(0, color="tab:red", lw=1.5))
+        a.set_ylabel(key if key == "overflow" else "HPWL")
+        a.grid(alpha=0.3)
+    ax_hpwl.tick_params(labelbottom=False)
+    ax_ovf.set_xlabel("iteration")
+    ax.set_title("iteration 0")  # reserve the title's space before fixing the layout
+    fig.suptitle(textwrap.fill(title or design.summary(), 80), fontsize=9)
+    # Fix the layout so the panels don't shift as the title text changes.
+    fig.draw_without_rendering()
+    fig.set_layout_engine("none")
+
+    images = []
+    for k in picks:
+        it, pos, filler_pos = res.snapshots[k]
+        h = res.history[it]
+        move(pos, filler_pos)
+        ax.set_title(f"iteration {it}: HPWL {h['hpwl']:.4g}, overflow {h['overflow']:.3f}")
+        for c in cursors:
+            c.set_xdata([it, it])
+        canvas.draw()
+        images.append(Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB"))
+    # The palette comes from the first (clumped, overlapping) and last (spread) frames.
+    first, last = images[0], images[-1]
+    both = Image.new("RGB", (first.width * 2, first.height))
+    both.paste(first, (0, 0))
+    both.paste(last, (first.width, 0))
+    palette = both.quantize(colors=64, dither=Image.Dither.NONE)
+    images = [im.quantize(palette=palette, dither=Image.Dither.NONE) for im in images]
+    durations = [round(1000 / fps)] * len(images)
+    durations[0] = durations[-1] = round(1000 * max(hold, 1 / fps))
+    images[0].save(path, save_all=True, append_images=images[1:], duration=durations, loop=0, optimize=True)

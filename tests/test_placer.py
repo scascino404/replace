@@ -35,3 +35,23 @@ def test_global_placement_converges():
     assert inside_die(d, res.pos)
     assert torch.equal(res.pos[d.fixed], d.pos[d.fixed])
     assert res.hpwl < 1.5 * hpwl(d, d.pos)
+
+
+def test_snapshots_and_animation(tmp_path):
+    from PIL import Image
+
+    from replace.plot import animate
+
+    d = generate(500, 1, seed=2)
+    assert global_place(d, PlacerConfig(max_iters=1500)).snapshots == []  # off by default
+    res = global_place(d, PlacerConfig(max_iters=1500, snapshot_every=7))
+    iters = [it for it, _, _ in res.snapshots]
+    assert iters[0] == 0 and iters[-1] == res.iterations  # the final placement is always kept
+    assert all(it % 7 == 0 for it in iters[:-1])
+    assert torch.allclose(res.snapshots[-1][1], res.pos.float())
+    assert res.snapshots[-1][2].shape == res.filler_pos.shape
+
+    path = tmp_path / "placement.gif"
+    animate(d, res, str(path), frames=10, fps=5, dpi=40)
+    with Image.open(path) as gif:
+        assert 2 <= gif.n_frames <= 10

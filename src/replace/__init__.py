@@ -24,6 +24,13 @@ def main() -> None:
     p.add_argument("--cells", type=int, default=10000)
     p.add_argument("--macros", type=int, default=0)
     p.add_argument("--plot", help="write the result figure to this .png path prefix")
+    p.add_argument("--gif", help="write an animation of the placement to this .gif path prefix")
+    p.add_argument("--gif-frames", type=int, default=80, help="frames, picked at evenly spaced overflow values (default 80)")
+    p.add_argument("--gif-fps", type=int, default=12, help="frames per second (default 12)")
+    p.add_argument("--gif-hold", type=float, default=1.5, help="seconds to hold the first and last frame (default 1.5)")
+    p.add_argument("--gif-dpi", type=int, default=100, help="resolution; the figure is 6 x 8.2 inches (default 100)")
+    p.add_argument("--gif-every", type=int, default=1,
+                   help="keep the placement every N iterations to pick frames from (default 1; raise it to save memory on large designs)")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--ds", action="store_true", help="dynamic step size adaptation (RePlAce -ds)")
     p.add_argument("--ld", action="store_true", help="constraint-oriented local density function (RePlAce -ld)")
@@ -40,7 +47,7 @@ def main() -> None:
     cfg = PlacerConfig(target_density=args.target_density, max_iters=args.max_iters, seed=args.seed)
 
     if args.cmd == "place":
-        from .plot import plot_result
+        from .plot import animate, plot_result
 
         design = generate(args.cells, args.macros, movable_macros=not args.fixed_macros, seed=args.seed)
         print(design.summary())
@@ -48,6 +55,7 @@ def main() -> None:
         cfg.log_every = args.log_every
         cfg.dynamic_step = args.ds
         cfg.local_density = args.ld
+        cfg.snapshot_every = args.gif_every if args.gif else 0
         res = global_place(design, cfg)
         print(
             f"HPWL {res.hpwl:.4e} ({res.hpwl / ref:.3f} x reference {ref:.4e}), overflow {res.overflow:.3f}, "
@@ -56,6 +64,8 @@ def main() -> None:
         )
         if args.plot:
             plot_result(design, res, f"{args.plot}.png")
+        if args.gif:
+            animate(design, res, f"{args.gif}.gif", frames=args.gif_frames, fps=args.gif_fps, hold=args.gif_hold, dpi=args.gif_dpi)
     else:
         from . import bench
 

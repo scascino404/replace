@@ -49,6 +49,36 @@ the die boundary, connected by about 20,000 nets.
 The benchmark (`uv run replace bench`) writes one such figure per design
 and mode to `benchmarks/results/`.
 
+## Animation
+
+![Cells and macros spreading out during global placement of a random 3k-cell design](docs/placement.gif)
+
+A placement run can also write an animated GIF of the actual placement (with
+`-ds`, the trial placement is not shown). This one comes from
+
+    uv run replace place --cells 3000 --macros 4 --ds --gif docs/placement
+
+The clump from the initial placement spreads while the macros separate, and the
+red cursor follows the HPWL and overflow curves. Cells barely move while λ is
+still small and spread quickly later, so frames are taken at evenly spaced
+overflow values rather than evenly spaced iterations.
+
+The animation is off by default. Its settings:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--gif PREFIX` | off | write `PREFIX.gif` |
+| `--gif-frames` | 80 | number of frames |
+| `--gif-fps` | 12 | frames per second |
+| `--gif-hold` | 1.5 | seconds to hold the first and last frame |
+| `--gif-dpi` | 100 | resolution of the 6 × 8.2 in figure (600 × 820 px at 100) |
+| `--gif-every` | 1 | keep the positions every N iterations to choose frames from |
+
+Snapshots of all objects and fillers are kept in memory during the run. For
+large designs, raise `--gif-every`. A small design also keeps individual
+cells visible and the file size manageable (2.9 MB here). From Python, set
+`PlacerConfig.snapshot_every` and call `replace.plot.animate(design, result, path)`.
+
 ## Algorithm
 
     min_v  f(v) = W(v) + λ·D(v)
